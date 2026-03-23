@@ -1,0 +1,640 @@
+---
+title: "LIWC Output Analysis"
+author: "Christian Barker"
+date: '`r Sys.Date()`'
+output: html_document
+---
+#####To Load to Github#####
+
+```{r, clean_and_group_feature_labels}
+# Clean up column names
+df <- df[, !names(df) %in% "Segment"] #Remove the 'segment' column added by LIWC.
+
+colnames(df)[colnames(df) == 'Provider.Cognition..Anomalous'] <- 'PCA'
+colnames(df)[colnames(df) == 'Provider.Cognition..Diagnostic.Reasoning'] <- 'PCDR'
+colnames(df)[colnames(df) == 'Diagnostic.Testing'] <- 'DT'
+colnames(df)[colnames(df) == 'Appeal.to.Protocol'] <- 'AtP'
+colnames(df)[colnames(df) == 'Containment.Precaution.Initiation'] <- 'CPI'
+colnames(df)[colnames(df) == 'Exposures'] <- 'Exp'
+colnames(df)[colnames(df) == 'Patient.Voice'] <- 'PV'
+colnames(df)[colnames(df) == 'Vertical.and.Horizontal.Collaboration'] <- 'VHC'
+colnames(df)[colnames(df) == 'Integration.of.Diagnostic.Information'] <- 'Integration.of.Diagnostic.Info'
+
+broad_themes <- c('PCA', 'PCDR', 'DT', 'AtP', 'CPI', 'Exp', 'PV', 'VHC') # Select broad themes for analysis
+df_sub_themes <- df[ , !(names(df) %in% broad_themes)] # Select sub-themes for analysis
+
+outbreaks <- c('Zika', 'Lepto', 'COVID19', 'Mpox', 'Combined')
+```
+
+```{r, raw_data_functions}
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(writexl)
+library(tidyr)
+
+LIWC_density_plot <- function(df){
+  
+  df_long <- df %>%
+    pivot_longer(
+      cols = -Filename, # The 'Filename' column indicates case type
+      names_to = 'variable',
+      values_to = 'value' 
+    )
+  
+  df_winsor <- df_long %>% # Winsorize tail to enhance visualization
+    group_by(variable) %>%
+    mutate(
+      qlow = 0,
+      qhigh = quantile(value, 0.998, na.rm = TRUE),
+      value_plot = pmax(pmin(value, qhigh), qlow)
+    )
+  
+  df_winsor$variable <- factor(df_winsor$variable,
+                           levels = c(names(df)))
+  
+  p <- ggplot(df_winsor, aes(x = value_plot, color = Filename, fill = Filename), ) +
+    geom_density(alpha = 0.1, size = 0.7, adjust = 1.2) +
+    facet_wrap( ~ variable, scales = 'free', ncol = 4) +
+    scale_color_manual('Case Type', values=six_colors) +  
+    scale_fill_manual('Case Type', values=six_colors) + 
+    labs(title = disease, y='Density', x='Dictionary Frequency (% Total Tokens)') +
+    theme_minimal() +
+    theme(legend.position = 'bottom') +
+    theme(plot.title.position = 'panel')
+  print(p)
+}
+
+interleave_mean_sd <- function(df, df1, df2) {
+
+  n <- length(rownames(t(df)))
+  
+  comb <- as.data.frame(matrix(NA, nrow = n))
+  rownames(comb) <- rownames(df1)
+  
+  for (i in seq_len(ncol(df1))) {
+    comb <- cbind(comb, df1[,i])
+    comb <- cbind(comb, df2[,i])
+  }
+  
+  summary_stats <- cbind(" "=rownames(t(df)), comb)
+  
+  colnames(summary_stats)[grepl("df1", colnames(summary_stats))] <- 'Mean'
+  colnames(summary_stats)[grepl("df2", colnames(summary_stats))] <- 'SD'
+}
+
+LIWC_summary_stats_xlsx <- function(df){
+  means <- df %>%
+    group_by(Filename) %>%
+    summarise(across(everything(),
+                     list(Mean = mean),
+                     na.rm = TRUE),
+              .groups = 'drop') %>%
+    mutate(across(where(is.numeric), ~ round(.x, 2)))
+  
+  sds <- df %>%
+    group_by(Filename) %>%
+    summarise(across(everything(),
+                     list(SD = sd),
+                     na.rm = TRUE),
+              .groups = 'drop') %>%
+    mutate(across(where(is.numeric), ~ round(.x, 2)))
+  
+  means_t <- t(means)
+  sds_t <- t(sds)
+  
+  summary_stats <- interleave(df, means_t, sds_t)
+  
+  write_xlsx(summary_stats$summary_stats, path = file.path(save_to, "Summary_Stats.xlsx"))
+}
+
+broad_theme_bar_charts <- function(df){
+  
+  means <- df %>%
+    group_by(Filename) %>%
+    summarise(across(everything(),
+                     list(Mean = mean),
+                     na.rm = TRUE),
+              .groups = 'drop') %>%
+    mutate(across(where(is.numeric), ~ round(.x, 2)))
+  
+  means_plots <- list()
+  for (disease in outbreaks) {
+    means_sub <- means[grepl(disease, means$Filename), ]
+    names(means_sub) <- substr(names(means_sub), 1, nchar(names(means_sub)) - 5)
+    
+    means_long <- means_sub %>%
+      pivot_longer(
+        cols = c(PCA, PCDR, DT, AtP, CPI, Exp, PV, VHC),
+        names_to = 'Theme',
+        values_to = 'Frequency'
+      )
+      
+    means_long$Theme <- factor(means_long$Theme, levels = c('PCA', 'PCDR', 'DT', 'AtP', 'CPI', 'Exp', 'PV', 'VHC'))
+  
+    
+    plot <- ggplot(means_long, aes(fill=Fil, y=Frequency, x=Theme)) +
+      geom_bar(position='dodge', stat='identity') +
+      xlab('Dictionary Theme') +
+      ylim(0, 6) +
+      ylab ('Frequency (% total tokens)') +
+      ggtitle(disease) +
+      theme(plot.title = element_text(hjust=0.5)) +
+      scale_fill_manual('Case Type',
+                        values=six_colors,
+                        labels = c('Random - Initial',
+                                   'Random - Late',
+                                   'Syndrome - Initial',
+                                   'Syndrome - Late',
+                                   'Case - Initial',
+                                   'Case - Late')) 
+    
+    means_plots[[disease]] <- plot
+  }
+  
+  means_plots <- wrap_plots(means_plots) +
+    plot_layout(guides = 'collect') &
+    theme(legend.direction = 'horizontal',
+          legend.position = 'bottom',
+          legend.justification = 'center')
+}
+```
+
+```{r, csda_function_final}
+library(klaR)
+
+csda_function <- function(y, X_scaled, manual_lambda, manual_gamma){
+  
+  df_scaled <- cbind(y, X_scaled)
+  
+  # Let klaR::rda calculate pooled and class-specific covariance.
+  cov_from_rda <- klaR::rda(
+    Filename ~ ., 
+    data = df_scaled,
+    lambda = 0,
+    gamma  = 0
+  )
+  
+  # Count case types
+  counts <- as.data.frame(table(df_scaled[[1]]))
+  n_all <- sum(counts[, 2]) # Count all cases.
+  n_init_case <- counts[grepl('Case.*Initial', counts[ ,1]), 2] # Count initial cases.
+  n_other <- n_all - n_init_case # Count all other cases.
+  
+  ####################################
+  ##> Within-Class Covariance (Cw) <##
+  ####################################
+  
+  # Extract pooled covariance
+  covp <- cov_from_rda$covpooled # Multiply by (n_init_case - 1) if using scatter instead of  covariance
+  
+  # Extract unadjusted initial case covariance.
+  case_cov <- as.data.frame(cov_from_rda$covariances)
+  init_case_cov <- as.matrix((case_cov[ , grepl('Case.*Initial', names(case_cov))]))
+
+  # Regularize initial case covariance using RDA-style regularization.
+  reg_case_cov <- as.matrix((1-manual_lambda)*init_case_cov + manual_lambda*covp) #Shift toward pooled covariance
+  reg_case_cov <- (1-manual_gamma)*reg_case_cov + manual_gamma*mean(diag(reg_case_cov))*diag(nrow(reg_case_cov)) # Shift toward spherical covariance
+  
+  Cw <- reg_case_cov
+  
+  #####################################
+  ##> Between-Class Covariance (Cb) <##
+  #####################################
+  
+  # For most discriminant analyses, between-class covariance or scatter is computed from all observations relative to a global mean.
+  # For class-specific discriminant analysis, between class covariance is computed from all 'out-class' observations to the 'in-class' mean.
+  
+  means <- as.matrix(cov_from_rda$means)
+  if (nrow(means) != length(unique(df_scaled$Group))) means <- t(means) # Transpose the means.
+  
+  early_case_means <- t(means[grepl('Case.*Initial', rownames(means)),]) # Extract 'in-class' mean, in this the means of case our initial confirmed cases.
+
+  centered <- sweep(means, 2, early_case_means, "-") # Subtract in-class means from all out-class means.
+  
+  counts_others <- counts[!grepl('Case.*Initial', counts[, 1]), ] # Create a table of counts for the out-classes to use as weights.
+  
+  if (nrow(centered) == 2){            # Prevent as.matrix() from converting vector to column matrix if there is only one out-class
+    centered_others <- t(as.matrix(centered[!grepl('Case.*Initial', rownames(centered)), ]))
+  } else {
+    centered_others <- as.matrix(centered[!grepl('Case.*Initial', rownames(centered)), ])
+  } 
+  
+  outclass_weighted <- matrix(0, ncol(X_scaled), ncol(X_scaled)) # Create an out-class scatter matrix relative to in-class mean
+  for (i in 1:nrow(counts_others)){
+    nk <- counts_others[i, 2]
+    d <- (centered_others[i, ])
+    outclass_weighted <- outclass_weighted + nk * (d %*% t(d))
+  }
+  
+  Cb <- (1/(n_other - 1)) * outclass_weighted # Use covariance instead of scatter because the in-class is relatively small. Also, Cw is covariance, not scatter.
+  
+  # Solve the generalized eigenproblem.
+  # Cholesky-based approach for real, stable discriminants.
+  
+  l <- 1e-6
+  
+  cCw <- try(chol(Cw), silent=TRUE)
+  if (inherits(cCw, 'try-error')){
+    cCw <- try(chol(Cw + diag(l, ncol(Cw))))
+    if (inherits(cCw, 'try-error')) {
+      stop("current level of l is not a diagonal perturbation that allows for modified cholesky decomposition")
+    }
+  }
+  
+  S <- solve(t(cCw)) %*% Cb %*% solve(cCw)
+  eig <- eigen(S)
+  
+   ######################
+   ####> PROJECTION <####
+   ######################
+
+  eig_values <- eig$values
+  eig_vectors <- eig$vectors
+  prop_var <- eig_values / sum(eig_values)
+  
+  # Extract coordinate scores along discriminant axes.
+  A_loadings <- backsolve(cCw, eig_vectors)
+  X <- as.matrix(X_scaled)
+  scores <- Re(X %*% A_loadings[, 1:2])
+  
+  df_scores <- data.frame(
+    LD1 = scores[, 1],
+    LD2 = scores[, 2],
+    Group = df_scaled$Group
+  )
+  
+  list(
+    csda_cv = csda_cv,
+    eig = eig,
+    eig_values = eig_values,
+    eig_vectors = eig_vectors,
+    df_scores = df_scores
+  )
+}
+```
+
+```{r, helper_functions}
+orient <- function(df_scores){
+  # Orient discriminant axes such that the initial case class centroid (the class we are most interested in) is above and to the right of the global centroid.
+  # This way, positive structural coefficients can be interpreted as correlating with the discriminant function in the direction of the initial cases.
+  
+  means_LD1 <- aggregate(LD1 ~ Group, data = df_scores, FUN = mean)
+  init_case_row <- which(grepl("^(?=.*case)(?=.*initial).*$", means_LD1$Group, ignore.case=TRUE, perl = TRUE))
+  
+  early_case_LD1_mean <- means_LD1[init_case_row, 2] #early cases
+  
+  means_LD2 <- aggregate(LD2 ~ Group, data = df_scores, FUN = mean)
+  early_case_LD2_mean <- means_LD2[init_case_row, 2] #early cases
+  
+  if (early_case_LD1_mean < mean(means_LD1$LD1)) {
+    df_scores$LD1 <- -df_scores$LD1
+  }
+  
+  if (early_case_LD2_mean < mean(means_LD2$LD2)) {
+    df_scores$LD2 <- -df_scores$LD2
+  }
+  
+  list(df_scores = df_scores)
+}
+
+correlation_df <- function(df_scores, X_unscaled){
+  # Create a Pearson correlation matrix of discriminant functions and original feature (dictionary theme) frequencies from LIWC-22. 
+  
+  corr_df <- cbind(df_scores, X_unscaled)
+  corr_df <- corr_df[, !grepl("Group", colnames(corr_df))]
+  corr_df <- cor(corr_df)
+  corr_df <- corr_df[!grepl("LD", rownames(corr_df)), c("LD1", "LD2")]
+  list(corr_df = corr_df)
+}
+```
+
+```{r, csda_scatter_implementation}
+
+make_csda_scatter_label <- function(i, eig_values, corr_df){
+  #Make informative labels for csda scatter plots, including the eigenvalue of the discriminant and top sctructural coefficients from corr_df.
+  eig_i<- round(eig_values[i], 3)
+  LD_i <- paste0("LD", i)
+  
+  LD_sc_df <- as.data.frame(corr_df[,i, drop = FALSE])
+  o <- order(abs(LD_sc_df[[LD_i]]), decreasing = TRUE)
+  LD_sc_df <- LD_sc_df[o, , drop = FALSE]
+  LD_sc_df_top <- LD_sc_df[1:(4-i), , drop = FALSE]
+  LD_sc_df_top <- LD_sc_df_top[order(LD_sc_df_top[[LD_i]], decreasing = FALSE), , drop = FALSE]
+  LD_top_sc <- paste0(rownames(LD_sc_df_top), " (", round(LD_sc_df_top[[LD_i]], 2), ")", collapse = ", ")
+  
+  LD_lab <- paste0(
+    "Discriminant ", i, " (eig = ", (eig_i), ")",
+    "\n\nTop SCs: ", LD_top_sc
+  ) 
+  
+  list(LD_lab = LD_lab)
+}
+
+csda_scatter <- function(df_sub, lambda, gamma, csda_labels){
+  # Combine all random together and all syndrome together.
+  df_sub$Filename[grepl("Syndrome", df_sub$Filename)] <- 'Syndrome (Initial + Late)'
+  df_sub$Filename[grepl("Random", df_sub$Filename)] <- 'Random (Initial + Late)'
+  
+  X <- as.matrix(df_sub[,2:ncol(df_sub), drop=FALSE])
+  X_unscaled <- X
+  X_scaled <- scale(X)
+  
+  y <- df_sub[, 1]
+  
+  # Apply function and pull output dfs into this environment.
+  csda_output <- csda_function(y, X_scaled, lambda, gamma)
+  eig_values <- csda_output$eig_values
+  
+  # Orient df_scores such that early cases have the most positive centroid.
+  df_scores <- orient(csda_output$df_scores)
+  df_scores <- df_scores$df_scores
+  
+  # Compute Structural coefficients.
+  corr_df <- correlation_df(df_scores, X_unscaled)
+  corr_df <- corr_df$corr_df
+  
+  LD1_lab <- csda_labels[1]
+  LD2_lab <- csda_labels[2]
+
+  
+  initial_cases <- sprintf("TrueCase_%s_Initial.txt", disease)
+  late_cases <- sprintf("TrueCase_%s_Late.txt", disease)
+  
+  ptitle <- paste0(disease, ' (lambda=', round(lambda, 2), ' gamma=', round(gamma, 2), ')')
+
+  p <- ggplot(df_scores, aes(x = LD1, y = LD2)) +
+    geom_point(data = subset(df_scores, Group == 'Random (Initial + Late)'),
+           aes(color = Group, shape = Group), shape = 19, size = 1.5, alpha = 0.8) +
+    geom_point(data = subset(df_scores, Group == 'Syndrome (Initial + Late)'),
+           aes(color = Group, shape = Group), shape = 19, size = 1.5, alpha = 0.8) +
+    geom_point(data = subset(df_scores, Group %in% late_cases),
+           aes(color = Group, shape = Group), shape = 19, size = 1.5, alpha = 0.8) +
+    geom_point(data = subset(df_scores, Group %in% initial_cases),
+           aes(color = Group, shape = Group), shape = 19, size = 2.5, alpha = 0.8) +
+
+
+    stat_ellipse(aes(color = Group), level = 0.95) +
+    labs(title = ptitle,
+         x = LD1_lab,
+         y = LD2_lab) +
+    theme(plot.title = element_text(hjust=0.5)) +
+    scale_color_manual('Case Type',
+                       values=four_colors,
+                       labels = c('Random (Initial + Late)',
+                                 'Syndrome (Initial + Late)',
+                                 'Case - Initial',
+                                 'Case - Late'
+                                 ))
+  
+  list(p = p)
+}
+
+outbreaks <- c('Zika', 'Lepto', 'COVID19', 'Mpox', 'Combined')
+
+################################
+###> RDA-tuned CSDA Scatter <###
+################################
+
+csda_plots <- list()
+for (disease in outbreaks){
+  df_sub <- df_sub_themes[grepl(disease, df_sub_themes$Filename), ]
+  y <- df_sub[, 1]
+  X_unscaled <- df_sub[, -1]
+  X_scaled <- scale(X_unscaled)
+  
+  # Extract lambda and gamma by regularizing for RDA accuracy.
+  set.seed(123)
+  train_control <- trainControl(
+  method = "cv",
+  number = 5,
+  verboseIter = FALSE,
+  sampling = 'smote'
+  )
+
+  rda_grid <- expand.grid(
+    gamma  = c(seq(0.001, 1.0, by=0.2), 1),
+    lambda = c(seq(0.001, 1.0, by=0.2), 1)
+  )
+  
+  rda_cv <- train(
+    Filename ~ ., 
+    data = df_sub,
+    method = "rda",          # klaR::rda
+    trControl = train_control,
+    tuneGrid = rda_grid,
+    metric = "Accuracy"
+  )
+  
+  rda_lambda <- rda_cv$bestTune$lambda
+  rda_gamma <- rda_cv$bestTune$gamma
+  
+  print(paste0(disease, rda_cv$bestTune))
+
+  csda_output <- csda_function(y, X_scaled, manual_lambda=rda_lambda, manual_gamma=rda_gamma)
+    
+  df_scores <- orient(csda_output$df_scores) # Standardize discriminant function signs.
+  df_scores <- df_scores$df_scores
+  
+  # Compute structural coefficients.
+  corr_df <- correlation_df(df_scores, X_unscaled)
+  corr_df <- as.matrix(corr_df$corr_df)
+  
+  eig_values <- csda_output$eig_values
+  
+  csda_labels <- list()
+  for (i in sequence(2)){
+    labels <- make_csda_scatter_label(i, eig_values, corr_df)
+    csda_labels[[i]] <- labels$LD_lab[1]
+  }
+
+  plot <- csda_scatter(df_sub, lambda=rda_lambda, gamma=rda_gamma, csda_labels)
+  p <- as.ggplot(plot$p)
+  
+  csda_plots[[disease]] <- p
+}
+
+csda_plots <- wrap_plots(csda_plots) +
+  plot_layout(guides = 'collect') &
+  theme(legend.direction = 'horizontal',
+        legend.position = 'bottom',
+        legend.justification = 'center',
+        legend.key = )
+```
+
+```{r, csda_binary_implementation}
+library(patchwork)
+
+binary_density_plot <- function(disease, cases_of_interest, manual_lambda, manual_gamma, plot_colors, label){
+  df_sub <- df_sub_themes[grepl(disease, df_sub_themes$Filename),]
+  df_sub <- df_sub[grepl(cases_of_interest, df_sub$Filename),]
+  df_sub <- df_sub[ , sapply(df_sub, function(x) length(unique(x)) > 1)]
+  
+  df_sub$Filename <- gsub('TrueCase.*Initial.txt$', 'Case - Initial', df_sub$Filename)
+  df_sub$Filename <- gsub('TrueCase.*Late.txt$', 'Case - Late', df_sub$Filename)
+  df_sub$Filename <- gsub('Syndrome.*Initial.txt$', 'Syndrome - Initial', df_sub$Filename)
+  df_sub$Filename <- gsub('Syndrome.*Late.txt$', 'Syndrome - Late', df_sub$Filename)
+  df_sub$Filename <- gsub('AllRandomVisits.*Initial.txt$', 'Random - Initial', df_sub$Filename)
+  df_sub$Filename <- gsub('AllRandomVisits.*Late.txt$', 'Syndrome - Late', df_sub$Filename)
+
+  
+  X <- as.matrix(df_sub[ , 2:ncol(df_sub), drop=FALSE])
+  X_unscaled <- X
+  X_scaled <- scale(X)
+  
+  y <- df_sub[ , 1]
+  
+  csda <- csda_function(y, X_scaled, manual_lambda=manual_lambda, manual_gamma=manual_gamma)
+  
+  eig_values <- csda$eig_values
+  
+  df_scores <- orient(csda$df_scores)
+  df_scores <- df_scores$df_scores
+  
+  # Create density plot.
+  label <- paste0("(Eigenvalue: ", (round(eig_values[1], 3)), ")")
+  
+  p_density <- ggplot(df_scores, aes(x=LD1, color=Group, fill=Group))+
+    geom_density(alpha = 0.1, size = 0.7, adjust = 1.2)+
+    scale_color_manual('Case Type', values=plot_colors) +
+    scale_fill_manual('Case Type', values=plot_colors) +
+    labs(title = paste0(disease, ' (lambda=', round(manual_lambda, 2), ', gamma=', round(manual_gamma, 2), ')'),
+                        y = 'Density',
+                        x = label) +
+    theme_minimal() +
+    theme(legend.position = 'bottom')
+  
+  corr_df <- correlation_df(df_scores, X_unscaled)
+  corr_df <- corr_df$corr_df
+  colnames(corr_df)[colnames(corr_df) == 'LD1'] <- 'r'
+  
+  o <- (order(sc_summary_table[, 1], decreasing = TRUE))
+  
+  sc_df <- as.data.frame(corr_df[,1, drop = FALSE]) %>%
+    .[o, , drop = FALSE] %>%
+    .[1:10, , drop = FALSE] %>%
+    .[order(.[,1], decreasing = TRUE), , drop=FALSE] %>%
+    round(2) %>%
+    rownames_to_column(var = "Theme")
+  
+  p_tbl <- as.ggplot(tableGrob(sc_df, rows=NULL)) #or sc_summary_table if averaging models
+  
+  fig <- (p_density / p_tbl) +
+    plot_layout(ncol = 1,
+                heights = c(1, 3))
+  
+  list(fig = fig)
+  
+}
+
+#########################################
+###> Initial Case vs Syndrome Binary <###
+#########################################
+
+binary_dens_plots <- list()
+
+for (disease in outbreaks){
+  
+  df_sub <- df_sub_themes[grepl(disease, df_sub_themes$Filename), ]
+  y <- df_sub[, 1]
+  X_unscaled <- df_sub[, -1]
+  X_scaled <- scale(X_unscaled)
+  
+  # Extract lambda and gamma by regularizing for RDA accuracy.
+  set.seed(123)
+  train_control <- trainControl(
+  method = "cv",
+  number = 5,
+  verboseIter = FALSE,
+  sampling = 'smote'
+  )
+
+  rda_grid <- expand.grid(
+    gamma  = c(seq(0.001, 1.0, by=0.1), 1),
+    lambda = c(seq(0.001, 1.0, by=0.1), 1)
+  )
+
+  rda_cv <- train(
+    Filename ~ .,
+    data = df_sub,
+    method = "rda",          # klaR::rda
+    trControl = train_control,
+    tuneGrid = rda_grid,
+    metric = "Accuracy"
+  )
+
+  rda_lambda <- rda_cv$bestTune$lambda
+  rda_gamma <- rda_cv$bestTune$gamma
+  
+  binary_dens_plot <- binary_density_plot(disease=disease,
+                                          cases_of_interest="(TrueCase|Syndrome).*Initial.txt$",
+                                          manual_lambda=rda_lambda,
+                                          manual_gamma=rda_gamma,
+                                          plot_colors=c('#BD551F','#264878'))
+  fig <- binary_dens_plot$fig
+  
+  binary_dens_plots[[disease]] <- fig
+}
+
+synd_binary_dens_plots <- wrap_plots(binary_dens_plots, nrow=1) +
+  plot_layout(guides = 'collect') &
+  theme(legend.direction = 'horizontal',
+        legend.position = 'bottom',
+        legend.justification = 'center')
+
+
+#####################################
+###> Initial vs Late Case Binary <###
+#####################################
+
+binary_dens_plots <- list()
+
+for (disease in outbreaks){
+  
+  df_sub <- df_sub_themes[grepl(disease, df_sub_themes$Filename), ]
+  y <- df_sub[, 1]
+  X_unscaled <- df_sub[, -1]
+  X_scaled <- scale(X_unscaled)
+  
+  # Extract lambda and gamma by regularizing for RDA accuracy.
+  set.seed(123)
+  train_control <- trainControl(
+  method = "cv",
+  number = 5,
+  verboseIter = FALSE,
+  sampling = 'smote'
+  )
+
+  rda_grid <- expand.grid(
+    gamma  = c(seq(0.001, 1.0, by=0.1), 1),
+    lambda = c(seq(0.001, 1.0, by=0.1), 1)
+  )
+  
+  rda_cv <- train(
+    Filename ~ ., 
+    data = df_sub,
+    method = "rda",          # klaR::rda
+    trControl = train_control,
+    tuneGrid = rda_grid,
+    metric = "Accuracy"
+  )
+  
+  rda_lambda <- rda_cv$bestTune$lambda
+  rda_gamma <- rda_cv$bestTune$gamma
+  
+  binary_dens_plot <- binary_density_plot(disease=disease,
+                                          cases_of_interest="TrueCase.*.txt$",
+                                          manual_lambda=rda_lambda,
+                                          manual_gamma=rda_gamma,
+                                          plot_colors=c('#BD551F','#DDB06D'))
+  fig <- binary_dens_plot$fig
+  
+  binary_dens_plots[[disease]] <- fig
+}
+
+late_binary_dens_plots <- wrap_plots(binary_dens_plots, nrow=1) +
+  plot_layout(guides = 'collect') &
+  theme(legend.direction = 'horizontal',
+        legend.position = 'bottom',
+        legend.justification = 'center')
+```

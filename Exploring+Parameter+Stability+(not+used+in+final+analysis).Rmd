@@ -1,0 +1,172 @@
+Exploring Parameter Stability
+
+```{r, scanning_parameter_range}
+# If evaluating structural coefficients across a range of RDA-style tuning parameters
+make_sc_summary <- function(df_sub){
+  
+  df_sub$Filename[grepl("Syndrome", df_sub$Filename)] <- 'Syndrome (Initial + Late)'
+  df_sub$Filename[grepl("Random", df_sub$Filename)] <- 'Random (Initial + Late)'
+  
+  X <- as.matrix(df_sub[,2:ncol(df_sub), drop=FALSE])
+  X_unscaled <- X
+  X_scaled <- scale(X)
+  y <- df_sub[, 1]
+  
+  structural_coeffs <- matrix(rownames <- colnames(X))
+  for (i in sequence(nrow(grid))){
+    lambda <- grid[i, 1]
+    gamma <- grid[i, 2]
+    
+    csda_output <- csda_function(y, X_scaled, lambda, gamma)
+    
+    #standardize discriminant function signs
+    df_scores <- orient(csda_output$df_scores) 
+    df_scores <- df_scores$df_scores
+    
+    #Structural coefficients
+    corr_df <- correlation_df(df_scores, X_unscaled)
+    corr_df <- as.matrix(corr_df$corr_df)
+    
+    structural_coeffs <- cbind(structural_coeffs, corr_df)
+  }
+  
+  structural_coeffs <- as.data.frame(structural_coeffs[, -1]) #remove row names from col 1
+  structural_coeffs[] <- lapply(structural_coeffs, function(x) as.numeric(as.character(x))) #convert numbers to numeric after cbind
+  
+  #calculate means and standard deviations
+  ld1_mean <- as.data.frame(rowMeans(structural_coeffs[ , grepl('LD1', names(structural_coeffs)), drop = FALSE], na.rm = TRUE))
+  ld1_sd <- as.data.frame(apply(structural_coeffs[, grepl('LD1', names(structural_coeffs)), drop = FALSE], 1, sd, na.rm = TRUE))
+  ld1_snr <- as.data.frame(abs(ld1_mean) / ld1_sd)
+  ld2_mean <- as.data.frame(rowMeans(structural_coeffs[ , grepl('LD2', names(structural_coeffs)), drop = FALSE], na.rm = TRUE))
+  ld2_sd <- as.data.frame(apply(structural_coeffs[, grepl('LD2', names(structural_coeffs)), drop = FALSE], 1, sd, na.rm = TRUE))
+  ld2_snr <- as.data.frame(abs(ld2_mean) / ld2_sd)
+  
+  sc_summary_table <- cbind(ld1_mean, ld2_mean, ld1_sd, ld2_sd, ld1_snr, ld2_snr)
+  names(sc_summary_table) <- c('ld1_mean', 'ld2_mean', 'ld1_sd', 'ld2_sd', 'ld1_snr', 'ld2_snr'
+                         )
+  sc_summary_table <- sc_summary_table[order(-sc_summary_table$ld1_mean), ]
+  
+  list(sc_summary_table = sc_summary_table)
+}
+
+make_csda_average_scatter_label <- function(i, sc_summary_table){
+  
+  LD_sc_df <- as.data.frame(sc_summary_table[ , c(i, i+2, i+4), drop = FALSE]) #mean, SD, SNR columns for the same discriminant function
+  
+  o <- order((LD_sc_df[, 1]), decreasing = TRUE)
+  LD_sc_df <- LD_sc_df[o, , drop = FALSE]
+  LD_sc_df_top <- LD_sc_df[1:(4-i), , drop = FALSE]
+  LD_sc_df_top <- LD_sc_df_top[order(LD_sc_df_top[, 1], decreasing = FALSE), , drop = FALSE]
+  LD_top_sc <- paste0(rownames(LD_sc_df_top), " ", round(LD_sc_df_top[, 1], 2), " (", round(LD_sc_df_top[, 3], 2), ")", collapse = ",\n ")
+  
+  LD_lab <- paste0(
+    "Discriminant ", i,
+    "\nTop SCs: ", LD_top_sc
+  ) 
+  
+  list(LD_lab = LD_lab)
+}
+```
+```{r, csda_averaging}
+
+outbreaks <- c('Lepto', 'Zika', 'Lepto', 'COVID19', 'Mpox', 'Combined')
+
+grid <- expand.grid(
+    lambda = c(seq(0, 1, by=.05)),
+    gamma  = 0
+  )
+
+csda_plots <- list()
+
+for (disease in outbreaks){
+  df_sub <- df_sub_themes[grepl(disease, df_sub_themes$Filename), ]
+  
+  sc_summary_table <- (make_sc_summary(df_sub))$sc_summary_table #runs csda across grid to extract structural coefficients
+  
+  csda_labels <- list() #pulls top SCs from sc_summary table and turns into labels
+  for (i in sequence(2)){
+    labels <- make_csda_average_scatter_label(i, sc_summary_table)
+    csda_labels[[i]] <- labels$LD_lab[1]
+  }
+  
+  print(csda_labels)
+
+  plot <- csda_scatter(df_sub, lambda=1, gamma=0.5, csda_labels) #prints csda scatter plot given lambda and gamma
+  p <- as.ggplot(plot$p)
+  
+  csda_plots[[disease]] <- p
+}
+
+csda_plots <- wrap_plots(csda_plots) +
+  plot_layout(guides = 'collect') &
+  theme(legend.direction = 'horizontal',
+        legend.position = 'bottom',
+        legend.justification = 'center',
+        legend.key = )
+
+ggsave(
+  filename = sprintf('averaged_CSDA_plots.tiff'),
+  plot = csda_plots,
+  path = save_to,
+  width = 20,
+  height = 10,
+  dpi = 300,
+  create.dir=TRUE)
+
+csda_plots
+```
+```{r, SVM}
+results_df <- data.frame(Outbreak = character(), signma = numeric(), C = numeric(), Accuracy = numeric(), Kappa = numeric(), stringsAsFactors = FALSE)
+
+outbreak <- c('Zika', 'Lepto', 'COVID19', 'Mpox', 'Combined')
+
+for (disease in outbreak) {
+  df_sub <- df_sub_themes[grepl(disease, df$Filename), ]
+  
+  #isolate the early cases and make it a binary classification problem (early case vs early non-case)
+  df_sub <- df_sub[grepl("Initial", df_sub$Filename, ignore.case=TRUE), ]
+  df_sub$Filename[!grepl("Case", df_sub$Filename)] <- "Noncase_Initial"
+  
+  X <- as.matrix(df_sub[,2:ncol(df_sub), drop=FALSE])
+  pca <- prcomp(X, scale = TRUE)
+  x_pca <- pca$x
+  y <- df_sub[, 1]
+  df_pca <- cbind(y, x_pca)
+
+  set.seed(123)
+  
+  ctrl <- trainControl(method = 'repeatedcv',
+                       number = 5,
+                       repeats = 2,
+                       sampling = 'smote')
+  
+  s0 <- as.numeric(kernlab::sigest(Filename ~ ., data = df_pca))
+  grid <- expand.grid(
+    sigma = seq(s0[3], s0[1], length.out = 5),
+    C = 2^(-3:4)
+  )
+  
+  svm_model <- train(
+    Filename ~ .,
+    data = df_pca,
+    method = 'svmRadial',
+    trControl = ctrl,
+    metric = 'Accuracy',
+    tuneGrid = grid
+    
+  )
+  
+  accuracy <- max(svm_model$results$Accuracy)
+  kappa <- max(svm_model$results$Kappa)
+  C <- svm_model$bestTune$C
+  sigma <- svm_model$bestTune$sigma
+  results_df <- rbind(results_df, data.frame(Outbreak = disease,
+                                             C = round(C, digits=2),
+                                             sigma = round(sigma, digits=2),
+                                             Accuracy = round(accuracy, digits=3),
+                                             Kappa = round(kappa, digits=3))
+  )
+}
+
+results_df
+```

@@ -1,0 +1,158 @@
+CSDA Scatter Plot
+
+```{r, csda_scatter_implementation}
+
+make_csda_scatter_label <- function(i, eig_values, corr_df){
+  
+  #Make informative labels for csda scatter plots, including the eigenvalue of the discriminant and top sctructural coefficients from corr_df.
+  
+  eig_i<- round(eig_values[i], 3)
+  LD_i <- paste0("LD", i)
+  
+  LD_sc_df <- as.data.frame(corr_df[,i, drop = FALSE])
+  o <- order(abs(LD_sc_df[[LD_i]]), decreasing = TRUE)
+  LD_sc_df <- LD_sc_df[o, , drop = FALSE]
+  LD_sc_df_top <- LD_sc_df[1:(4-i), , drop = FALSE]
+  LD_sc_df_top <- LD_sc_df_top[order(LD_sc_df_top[[LD_i]], decreasing = FALSE), , drop = FALSE]
+  LD_top_sc <- paste0(rownames(LD_sc_df_top), " (", round(LD_sc_df_top[[LD_i]], 2), ")", collapse = ", ")
+  
+  LD_lab <- paste0(
+    "Discriminant ", i, " (eig = ", (eig_i), ")",
+    "\n\nTop SCs: ", LD_top_sc
+  ) 
+  
+  list(LD_lab = LD_lab)
+}
+
+csda_scatter <- function(df_sub, lambda, gamma, csda_labels){
+  
+  # Combine all random together and all syndrome together.
+  
+  df_sub$Filename[grepl("Syndrome", df_sub$Filename)] <- 'Syndrome (Initial + Late)'
+  df_sub$Filename[grepl("Random", df_sub$Filename)] <- 'Random (Initial + Late)'
+  
+  X <- as.matrix(df_sub[,2:ncol(df_sub), drop=FALSE])
+  X_unscaled <- X
+  X_scaled <- scale(X)
+  
+  y <- df_sub[, 1]
+  
+  # Apply function and pull output dfs into this environment.
+  csda_output <- csda_function(y, X_scaled, lambda, gamma)
+  eig_values <- csda_output$eig_values
+  
+  # Orient df_scores such that early cases have the most positive centroid.
+  df_scores <- orient(csda_output$df_scores)
+  df_scores <- df_scores$df_scores
+  
+  # Compute structural coefficients.
+  corr_df <- correlation_df(df_scores, X_unscaled)
+  corr_df <- corr_df$corr_df
+  
+  LD1_lab <- csda_labels[1]
+  LD2_lab <- csda_labels[2]
+
+  
+  initial_cases <- sprintf("TrueCase_%s_Initial.txt", disease)
+  late_cases <- sprintf("TrueCase_%s_Late.txt", disease)
+  
+  ptitle <- paste0(disease, ' (lambda=', round(lambda, 2), ' gamma=', round(gamma, 2), ')')
+
+  p <- ggplot(df_scores, aes(x = LD1, y = LD2)) +
+    geom_point(data = subset(df_scores, Group == 'Random (Initial + Late)'),
+           aes(color = Group, shape = Group), shape = 19, size = 1.5, alpha = 0.8) +
+    geom_point(data = subset(df_scores, Group == 'Syndrome (Initial + Late)'),
+           aes(color = Group, shape = Group), shape = 19, size = 1.5, alpha = 0.8) +
+    geom_point(data = subset(df_scores, Group %in% late_cases),
+           aes(color = Group, shape = Group), shape = 19, size = 1.5, alpha = 0.8) +
+    geom_point(data = subset(df_scores, Group %in% initial_cases),
+           aes(color = Group, shape = Group), shape = 19, size = 2.5, alpha = 0.8) +
+
+
+    stat_ellipse(aes(color = Group), level = 0.95) +
+    labs(title = ptitle,
+         x = LD1_lab,
+         y = LD2_lab) +
+    theme(plot.title = element_text(hjust=0.5)) +
+    scale_color_manual('Case Type',
+                       values=four_colors,
+                       labels = c('Random (Initial + Late)',
+                                 'Syndrome (Initial + Late)',
+                                 'Case - Initial',
+                                 'Case - Late'
+                                 ))
+  
+  list(p = p)
+}
+
+outbreaks <- c('Zika', 'Lepto', 'COVID19', 'Mpox', 'Combined')
+
+################################
+###> RDA-tuned CSDA Scatter <###
+################################
+
+csda_plots <- list()
+for (disease in outbreaks){
+  df_sub <- df_sub_themes[grepl(disease, df_sub_themes$Filename), ]
+  y <- df_sub[, 1]
+  X_unscaled <- df_sub[, -1]
+  X_scaled <- scale(X_unscaled)
+  
+  # Extract lambda and gamma by regularizing for RDA accuracy.
+  set.seed(123)
+  train_control <- trainControl(
+  method = "cv",
+  number = 5,
+  verboseIter = FALSE,
+  sampling = 'smote'
+  )
+
+  rda_grid <- expand.grid(
+    gamma  = c(seq(0.001, 1.0, by=0.2), 1),
+    lambda = c(seq(0.001, 1.0, by=0.2), 1)
+  )
+  
+  rda_cv <- train(
+    Filename ~ ., 
+    data = df_sub,
+    method = "rda",          # klaR::rda
+    trControl = train_control,
+    tuneGrid = rda_grid,
+    metric = "Accuracy"
+  )
+  
+  rda_lambda <- rda_cv$bestTune$lambda
+  rda_gamma <- rda_cv$bestTune$gamma
+  
+  print(paste0(disease, rda_cv$bestTune))
+
+  csda_output <- csda_function(y, X_scaled, manual_lambda=rda_lambda, manual_gamma=rda_gamma)
+    
+  df_scores <- orient(csda_output$df_scores) #standardize discriminant function signs.
+  df_scores <- df_scores$df_scores
+  
+  # Compute structural coefficients.
+  corr_df <- correlation_df(df_scores, X_unscaled)
+  corr_df <- as.matrix(corr_df$corr_df)
+  
+  eig_values <- csda_output$eig_values
+  
+  csda_labels <- list()
+  for (i in sequence(2)){
+    labels <- make_csda_scatter_label(i, eig_values, corr_df)
+    csda_labels[[i]] <- labels$LD_lab[1]
+  }
+
+  plot <- csda_scatter(df_sub, lambda=rda_lambda, gamma=rda_gamma, csda_labels)
+  p <- as.ggplot(plot$p)
+  
+  csda_plots[[disease]] <- p
+}
+
+csda_plots <- wrap_plots(csda_plots) +
+  plot_layout(guides = 'collect') &
+  theme(legend.direction = 'horizontal',
+        legend.position = 'bottom',
+        legend.justification = 'center',
+        legend.key = )
+```
