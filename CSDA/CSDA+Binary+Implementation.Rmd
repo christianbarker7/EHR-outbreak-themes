@@ -1,0 +1,179 @@
+CSDA Binary Implementation
+
+```{r, csda_binary_implementation}
+library(patchwork)
+
+binary_density_plot <- function(df_sub_themes, disease, cases_of_interest, manual_lambda, manual_gamma, plot_colors, label){
+  df_sub <- df_sub_themes[grepl(disease, df_sub_themes$Filename),]
+  df_sub <- df_sub[grepl(cases_of_interest, df_sub$Filename),]
+  df_sub <- df_sub[ , sapply(df_sub, function(x) length(unique(x)) > 1)]
+  
+  df_sub$Filename <- gsub('TrueCase.*Initial.txt$', 'Case - Initial', df_sub$Filename)
+  df_sub$Filename <- gsub('TrueCase.*Late.txt$', 'Case - Late', df_sub$Filename)
+  df_sub$Filename <- gsub('Syndrome.*Initial.txt$', 'Syndrome - Initial', df_sub$Filename)
+  df_sub$Filename <- gsub('Syndrome.*Late.txt$', 'Syndrome - Late', df_sub$Filename)
+  df_sub$Filename <- gsub('AllRandomVisits.*Initial.txt$', 'Random - Initial', df_sub$Filename)
+  df_sub$Filename <- gsub('AllRandomVisits.*Late.txt$', 'Syndrome - Late', df_sub$Filename)
+
+  
+  X <- as.matrix(df_sub[ , 2:ncol(df_sub), drop=FALSE])
+  X_unscaled <- X
+  X_scaled <- scale(X)
+  
+  y <- df_sub[ , 1]
+  
+  csda <- csda_function(y, X_scaled, manual_lambda=manual_lambda, manual_gamma=manual_gamma)
+  
+  eig_values <- csda$eig_values
+  
+  df_scores <- orient(csda$df_scores)
+  df_scores <- df_scores$df_scores
+  
+  #create density plot
+  label <- paste0("(Eigenvalue: ", (round(eig_values[1], 3)), ")")
+  
+  p_density <- ggplot(df_scores, aes(x=LD1, color=Group, fill=Group))+
+    geom_density(alpha = 0.1, size = 0.7, adjust = 1.2)+
+    scale_color_manual('Case Type', values=plot_colors) +
+    scale_fill_manual('Case Type', values=plot_colors) +
+    labs(title = paste0(disease, ' (lambda=', round(manual_lambda, 2), ', gamma=', round(manual_gamma, 2), ')'),
+                        y = 'Density',
+                        x = label) +
+    theme_minimal() +
+    theme(legend.position = 'bottom')
+  
+  corr_df <- correlation_df(df_scores, X_unscaled)
+  corr_df <- corr_df$corr_df
+  colnames(corr_df)[colnames(corr_df) == 'LD1'] <- 'r'
+  
+  o <- (order(sc_summary_table[, 1], decreasing = TRUE))
+  
+  sc_df <- as.data.frame(corr_df[,1, drop = FALSE]) %>%
+    .[o, , drop = FALSE] %>%
+    .[1:10, , drop = FALSE] %>%
+    .[order(.[,1], decreasing = TRUE), , drop=FALSE] %>%
+    round(2) %>%
+    rownames_to_column(var = "Theme")
+  
+  p_tbl <- as.ggplot(tableGrob(sc_df, rows=NULL)) #or sc_summary_table if averaging models
+  
+  fig <- (p_density / p_tbl) +
+    plot_layout(ncol = 1,
+                heights = c(1, 3))
+  
+  list(fig = fig)
+  
+}
+
+#########################################
+###> Initial Case vs Syndrome Binary <###
+#########################################
+binary_dens_plots <- list()
+
+for (disease in outbreaks){
+  
+  df_sub <- df_sub_themes[grepl(disease, df_sub_themes$Filename), ]
+  y <- df_sub[, 1]
+  X_unscaled <- df_sub[, -1]
+  X_scaled <- scale(X_unscaled)
+  
+  # Extract lambda and gamma by regularizing for RDA accuracy.
+  set.seed(123)
+  train_control <- trainControl(
+  method = "cv",
+  number = 5,
+  verboseIter = FALSE,
+  sampling = 'smote'
+  )
+
+  rda_grid <- expand.grid(
+    gamma  = c(seq(0.001, 1.0, by=0.1), 1),
+    lambda = c(seq(0.001, 1.0, by=0.1), 1)
+  )
+
+  rda_cv <- train(
+    Filename ~ .,
+    data = df_sub,
+    method = "rda",          # klaR::rda
+    trControl = train_control,
+    tuneGrid = rda_grid,
+    metric = "Accuracy"
+  )
+
+  rda_lambda <- rda_cv$bestTune$lambda
+  rda_gamma <- rda_cv$bestTune$gamma
+  
+  binary_dens_plot <- binary_density_plot(df_sub_themes=df_sub_themes,
+                                          disease=disease,
+                                          cases_of_interest="(TrueCase|Syndrome).*Initial.txt$",
+                                          manual_lambda=rda_lambda,
+                                          manual_gamma=rda_gamma,
+                                          plot_colors=c('#BD551F','#264878'))
+  fig <- binary_dens_plot$fig
+  
+  binary_dens_plots[[disease]] <- fig
+}
+
+synd_binary_dens_plots <- wrap_plots(binary_dens_plots, nrow=1) +
+  plot_layout(guides = 'collect') &
+  theme(legend.direction = 'horizontal',
+        legend.position = 'bottom',
+        legend.justification = 'center')
+
+
+#####################################
+###> Initial vs Late Case Binary <###
+#####################################
+
+binary_dens_plots <- list()
+
+for (disease in outbreaks){
+  
+  df_sub <- df_sub_themes[grepl(disease, df_sub_themes$Filename), ]
+  y <- df_sub[, 1]
+  X_unscaled <- df_sub[, -1]
+  X_scaled <- scale(X_unscaled)
+  
+  # Extract lambda and gamma by regularizing for RDA accuracy.
+  set.seed(123)
+  train_control <- trainControl(
+  method = "cv",
+  number = 5,
+  verboseIter = FALSE,
+  sampling = 'smote'
+  )
+
+  rda_grid <- expand.grid(
+    gamma  = c(seq(0.001, 1.0, by=0.1), 1),
+    lambda = c(seq(0.001, 1.0, by=0.1), 1)
+  )
+  
+  rda_cv <- train(
+    Filename ~ ., 
+    data = df_sub,
+    method = "rda",          # klaR::rda
+    trControl = train_control,
+    tuneGrid = rda_grid,
+    metric = "Accuracy"
+  )
+  
+  rda_lambda <- rda_cv$bestTune$lambda
+  rda_gamma <- rda_cv$bestTune$gamma
+  
+  binary_dens_plot <- binary_density_plot(df_sub_themes=df_sub_themes,
+                                          disease=disease,
+                                          cases_of_interest="TrueCase.*.txt$",
+                                          manual_lambda=rda_lambda,
+                                          manual_gamma=rda_gamma,
+                                          plot_colors=c('#BD551F','#DDB06D'))
+  fig <- binary_dens_plot$fig
+  
+  binary_dens_plots[[disease]] <- fig
+}
+
+late_binary_dens_plots <- wrap_plots(binary_dens_plots, nrow=1) +
+  plot_layout(guides = 'collect') &
+  theme(legend.direction = 'horizontal',
+        legend.position = 'bottom',
+        legend.justification = 'center')
+```

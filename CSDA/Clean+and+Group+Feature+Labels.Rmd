@@ -1,0 +1,21 @@
+Clean and Group Feature Labels
+
+```{r, clean_and_group_feature_labels}
+# Clean up column names
+df <- df[, !names(df) %in% "Segment"] #Remove the 'segment' column added by LIWC.
+
+colnames(df)[colnames(df) == 'Provider.Cognition..Anomalous'] <- 'PCA'
+colnames(df)[colnames(df) == 'Provider.Cognition..Diagnostic.Reasoning'] <- 'PCDR'
+colnames(df)[colnames(df) == 'Diagnostic.Testing'] <- 'DT'
+colnames(df)[colnames(df) == 'Appeal.to.Protocol'] <- 'AtP'
+colnames(df)[colnames(df) == 'Containment.Precaution.Initiation'] <- 'CPI'
+colnames(df)[colnames(df) == 'Exposures'] <- 'Exp'
+colnames(df)[colnames(df) == 'Patient.Voice'] <- 'PV'
+colnames(df)[colnames(df) == 'Vertical.and.Horizontal.Collaboration'] <- 'VHC'
+colnames(df)[colnames(df) == 'Integration.of.Diagnostic.Information'] <- 'Integration.of.Diagnostic.Info'
+
+broad_themes <- c('PCA', 'PCDR', 'DT', 'AtP', 'CPI', 'Exp', 'PV', 'VHC') # Select broad themes for analysis
+df_sub_themes <- df[ , !(names(df) %in% broad_themes)] # Select sub-themes for analysis
+
+outbreaks <- c('Zika', 'Lepto', 'COVID19', 'Mpox', 'Combined')
+```

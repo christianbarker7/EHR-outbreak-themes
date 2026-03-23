@@ -1,0 +1,36 @@
+Helper Functions
+
+```{r, helper_functions}
+orient <- function(df_scores){
+  # Orient discriminant axes such that the initial case class centroid (the class we are most interested in) is above and to the right of the global centroid.
+  # This way, positive structural coefficients can be interpreted as correlating with the discriminant function in the direction of the initial cases.
+  
+  means_LD1 <- aggregate(LD1 ~ Group, data = df_scores, FUN = mean)
+  init_case_row <- which(grepl("^(?=.*case)(?=.*initial).*$", means_LD1$Group, ignore.case=TRUE, perl = TRUE))
+  
+  early_case_LD1_mean <- means_LD1[init_case_row, 2] #early cases
+  
+  means_LD2 <- aggregate(LD2 ~ Group, data = df_scores, FUN = mean)
+  early_case_LD2_mean <- means_LD2[init_case_row, 2] #early cases
+  
+  if (early_case_LD1_mean < mean(means_LD1$LD1)) {
+    df_scores$LD1 <- -df_scores$LD1
+  }
+  
+  if (early_case_LD2_mean < mean(means_LD2$LD2)) {
+    df_scores$LD2 <- -df_scores$LD2
+  }
+  
+  list(df_scores = df_scores)
+}
+
+correlation_df <- function(df_scores, X_unscaled){
+  #Create a Pearson correlation matrix of discriminant functions and original feature (dictionary theme) frequencies from LIWC-22. 
+  
+  corr_df <- cbind(df_scores, X_unscaled)
+  corr_df <- corr_df[, !grepl("Group", colnames(corr_df))]
+  corr_df <- cor(corr_df)
+  corr_df <- corr_df[!grepl("LD", rownames(corr_df)), c("LD1", "LD2")]
+  list(corr_df = corr_df)
+}
+```

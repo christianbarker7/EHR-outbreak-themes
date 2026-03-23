@@ -1,0 +1,122 @@
+Core CSDA Function
+
+```{r, core_csda_function}
+library(klaR)
+
+csda_function <- function(y, X_scaled, manual_lambda, manual_gamma){
+    #Class-specific discriminant analysis with RDA-style regularization of the within-class covariance
+    # y <- column vector of class labels (First col of LIWC output, called 'Filename' if running LIWC-22 over a folder of files)
+    # X_scaled <- scaled matrix of observations x features (from LIWC output)
+    # manual_lambda <- tuning parameter to shift toward pooled covariance
+    # manual_gamma <- tuning parameter to shift toward spherical covariance
+    # The crucial output is df_scores, a dataframe with discriminant scores for each observation on the first two discriminant axes.
+    # These scores are plotted in a scatter plot and used to calculate structural coefficients downstream.
+  
+  df_scaled <- cbind(y, X_scaled)
+  
+  #Let klaR::rda calculate pooled and class-specific covariance
+  cov_from_rda <- klaR::rda(
+    Filename ~ ., 
+    data = df_scaled,
+    lambda = 0,
+    gamma  = 0
+  )
+  
+  # Count case types
+  counts <- as.data.frame(table(df_scaled[[1]]))
+  n_all <- sum(counts[, 2]) #count of all cases
+  n_init_case <- counts[grepl('Case.*Initial', counts[ ,1]), 2] #count initial cases
+  n_other <- n_all - n_init_case #count all other cases
+  
+  ####################################
+  ##> Within-Class Covariance (Cw) <##
+  ####################################
+  
+  # Extract pooled covariance from klaR::rda
+  covp <- cov_from_rda$covpooled # Multiply by (n_init_case - 1) if using scatter instead of  covariance
+  
+  # Extracted unadjusted initial case covariance from klaR::rda
+  case_cov <- as.data.frame(cov_from_rda$covariances)
+  init_case_cov <- as.matrix((case_cov[ , grepl('Case.*Initial', names(case_cov))]))
+
+  # Regularize initial case covariance using RDA-style regularization
+  reg_case_cov <- as.matrix((1-manual_lambda)*init_case_cov + manual_lambda*covp) #Shift toward pooled covariance
+  reg_case_cov <- (1-manual_gamma)*reg_case_cov + manual_gamma*mean(diag(reg_case_cov))*diag(nrow(reg_case_cov)) # Shift toward spherical covariance
+  
+  Cw <- reg_case_cov
+  
+  #####################################
+  ##> Between-Class Covariance (Cb) <##
+  #####################################
+  
+  # For most discriminant analyses, between-class covariance or scatter is computed from all observations relative to a global mean.
+  # For class-specific discriminant analysis, between class covariance is computed from all 'non-class-of-interest 'out-class' observations to the 'in-class' mean.
+  
+  means <- as.matrix(cov_from_rda$means)
+  if (nrow(means) != length(unique(df_scaled$Group))) means <- t(means) # Transpose means
+  
+  early_case_means <- t(means[grepl('Case.*Initial', rownames(means)),]) # Extract 'in-class' mean, in this case our initial confirmed cases
+
+  centered <- sweep(means, 2, early_case_means, "-") # Subtract in-class means from all out-class means
+  
+  counts_others <- counts[!grepl('Case.*Initial', counts[, 1]), ] #Create a table of counts for the out-classes to use as weights
+  
+  if (nrow(centered) == 2){            # Prevent as.matrix() from converting vector to column matrix if there is only one out-class
+    centered_others <- t(as.matrix(centered[!grepl('Case.*Initial', rownames(centered)), ]))
+  } else {
+    centered_others <- as.matrix(centered[!grepl('Case.*Initial', rownames(centered)), ])
+  } 
+  
+  outclass_weighted <- matrix(0, ncol(X_scaled), ncol(X_scaled)) # Create an out-class scatter matrix relative to in-class mean
+  for (i in 1:nrow(counts_others)){
+    nk <- counts_others[i, 2]
+    d <- (centered_others[i, ])
+    outclass_weighted <- outclass_weighted + nk * (d %*% t(d))
+  }
+  
+  Cb <- (1/(n_other - 1)) * outclass_weighted # Use covariance instead of scatter because the in-class is relatively small. Also, Cw is covariance, not scatter.
+  
+  # Solve the generalized eigenproblem
+  # Cholesky-based approach for real, stable discriminants
+  
+  l <- 1e-6
+  
+  cCw <- try(chol(Cw), silent=TRUE)
+  if (inherits(cCw, 'try-error')){
+    cCw <- try(chol(Cw + diag(l, ncol(Cw))))
+    if (inherits(cCw, 'try-error')) {
+      stop(f"current level of l={l} is not a diagonal perturbation that allows for modified cholesky decomposition")
+    }
+  }
+  
+  S <- solve(t(cCw)) %*% Cb %*% solve(cCw)
+  eig <- eigen(S)
+  
+   ######################
+   ####> PROJECTION <####
+   ######################
+
+  eig_values <- eig$values
+  eig_vectors <- eig$vectors
+  prop_var <- eig_values / sum(eig_values)
+  
+  # Extract coordinate scores along discriminant axes
+  A_loadings <- backsolve(cCw, eig_vectors)
+  X <- as.matrix(X_scaled)
+  scores <- Re(X %*% A_loadings[, 1:2])
+  
+  df_scores <- data.frame(
+    LD1 = scores[, 1],
+    LD2 = scores[, 2],
+    Group = df_scaled$Group
+  )
+  
+  list(
+    csda_cv = csda_cv,
+    eig = eig,
+    eig_values = eig_values,
+    eig_vectors = eig_vectors,
+    df_scores = df_scores
+  )
+}
+```
